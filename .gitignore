@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data files (too large for git)
+bailii_comprehensive_data.csv
+bailii_checkpoint_*.csv
+sablemoore_training_data_hybrid.csv
+scrape_progress.log
+
+# Test files
+test_cases/*.txt
+
+# MacOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.bak
