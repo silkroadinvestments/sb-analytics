@@ -258,17 +258,20 @@ class AIModelManager:
         self.embedding_model = load_embedding_model()
 
         # Try to load pre-trained hybrid model
+        import traceback
         try:
             if os.path.exists('sablemoore_models_hybrid.pkl'):
+                st.sidebar.info("Loading XGBoost hybrid model...")
                 with open('sablemoore_models_hybrid.pkl', 'rb') as f:
                     model_data = pickle.load(f)
 
                 self.success_predictor = model_data['success_predictor']
                 self.label_encoders = model_data['label_encoders']
 
-                st.sidebar.success("✓ Loaded XGBoost model (72% accuracy)")
+                st.sidebar.success("✓ Loaded XGBoost hybrid model (72% accuracy)")
                 return
             elif os.path.exists('sablemoore_models.pkl'):
+                st.sidebar.info("Loading 100K model...")
                 with open('sablemoore_models.pkl', 'rb') as f:
                     model_data = pickle.load(f)
 
@@ -277,15 +280,23 @@ class AIModelManager:
 
                 st.sidebar.success("✓ Loaded 100K model (71% accuracy)")
                 return
-        except Exception as e:
-            st.sidebar.warning(f"Could not load pre-trained model: {e}")
+            else:
+                st.sidebar.error("❌ No pre-trained model file found!")
+                st.sidebar.info(f"Looking in: {os.getcwd()}")
+                st.sidebar.info(f"Files present: {os.listdir('.')}")
 
-        # Fallback: Create synthetic UK litigation training data
+        except Exception as e:
+            st.sidebar.error(f"❌ Model loading failed: {str(e)}")
+            st.sidebar.code(traceback.format_exc())
+
+        # Fallback: Create synthetic UK litigation training data (with 10 features to match)
+        st.sidebar.warning("⚠️ Using fallback training mode - creating simple model")
         training_data = self._create_training_data()
 
-        # Train success prediction model
+        # Train success prediction model with ALL 10 features
         X = training_data[['case_type_enc', 'jurisdiction_enc', 'defendant_type_enc',
-                          'complexity_enc', 'claim_amount_log']]
+                          'complexity_enc', 'claim_amount_log', 'claim_amount_scaled',
+                          'duration_months', 'high_value_claim', 'is_complex', 'is_appeal']]
         y = training_data['success_rate']
 
         self.success_predictor = GradientBoostingRegressor(
@@ -373,7 +384,20 @@ class AIModelManager:
             df[f'{col}_enc'] = le.fit_transform(df[col])
             self.label_encoders[col] = le
 
+        # Add all 10 features to match the model
         df['claim_amount_log'] = np.log1p(df['claim_amount'])
+        df['claim_amount_scaled'] = df['claim_amount'] / 1000000
+
+        # Duration estimate
+        df['duration_months'] = df.apply(lambda row:
+            36 if row['jurisdiction'] in ['Supreme Court', 'Court of Appeal']
+            else 21 if row['jurisdiction'] == 'High Court'
+            else 25 if row['complexity'] == 'High'
+            else 12, axis=1)
+
+        df['high_value_claim'] = (df['claim_amount'] > 500000).astype(int)
+        df['is_complex'] = (df['complexity'] == 'High').astype(int)
+        df['is_appeal'] = df['jurisdiction'].isin(['Court of Appeal', 'Supreme Court']).astype(int)
 
         return df
 
