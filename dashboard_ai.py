@@ -294,10 +294,15 @@ class AIModelManager:
         training_data = self._create_training_data()
 
         # Train success prediction model with ALL 10 features
-        X = training_data[['case_type_enc', 'jurisdiction_enc', 'defendant_type_enc',
-                          'complexity_enc', 'claim_amount_log', 'claim_amount_scaled',
-                          'duration_months', 'high_value_claim', 'is_complex', 'is_appeal']]
+        feature_cols = ['case_type_enc', 'jurisdiction_enc', 'defendant_type_enc',
+                       'complexity_enc', 'claim_amount_log', 'claim_amount_scaled',
+                       'duration_months', 'high_value_claim', 'is_complex', 'is_appeal']
+
+        X = training_data[feature_cols]
         y = training_data['success_rate']
+
+        st.sidebar.info(f"Training data shape: {X.shape}")
+        st.sidebar.info(f"Features: {list(X.columns)}")
 
         self.success_predictor = GradientBoostingRegressor(
             n_estimators=100,
@@ -306,6 +311,8 @@ class AIModelManager:
             random_state=42
         )
         self.success_predictor.fit(X, y)
+
+        st.sidebar.success(f"✓ Fallback model trained with {X.shape[1]} features")
 
     def _create_training_data(self):
         """Create synthetic training data based on UK litigation statistics"""
