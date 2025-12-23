@@ -399,97 +399,10 @@ def load_judge_intelligence():
         return pd.DataFrame()
 
 
-class EnhancedAIModelManager:
-    """
-    Premium AI model with XGBoost + Neural Network ensemble
-    Accuracy: 92% with judge intelligence
-    """
-
-    def __init__(self):
-        self.embedding_model = None
-        self.success_predictor = None
-        self.label_encoders = {}
-        self.judge_database = pd.DataFrame()
-        self._initialize_models()
-
-    def _initialize_models(self):
-        """Initialize ML models with trained weights"""
-        self.embedding_model = load_embedding_model()
-
-        # Load pre-trained model if available
-        try:
-            with open('sablemoore_models.pkl', 'rb') as f:
-                model_data = pickle.load(f)
-            self.success_predictor = model_data['success_predictor']
-            self.label_encoders = model_data['label_encoders']
-            print("✓ Loaded 100K trained model (71% base accuracy)")
-        except FileNotFoundError:
-            # Fallback to creating simple model
-            self._create_training_data()
-            print("⚠️  Using fallback model")
-
-        # Load judge intelligence
-        self.judge_database = load_judge_intelligence()
-        if not self.judge_database.empty:
-            print(f"✓ Loaded {len(self.judge_database)} judge profiles (92% accuracy)")
-
-    def _create_training_data(self):
-        """Create synthetic training data if no pre-trained model"""
-        np.random.seed(42)
-
-        # Generate 500 training samples (fallback)
-        samples = []
-        case_types = ['Contract Dispute', 'Personal Injury', 'Employment',
-                     'Commercial Dispute', 'Property', 'Debt Recovery']
-
-        for _ in range(500):
-            case_type = np.random.choice(case_types)
-            jurisdiction = np.random.choice(['High Court', 'County Court'])
-            defendant_type = np.random.choice(['Corporate', 'Individual'])
-            complexity = np.random.choice(['Low', 'Medium', 'High'])
-            claim_amount = np.random.lognormal(12, 1.5)
-
-            success_rate = np.random.beta(6, 4)  # Mean 0.6
-
-            samples.append({
-                'case_type': case_type,
-                'jurisdiction': jurisdiction,
-                'defendant_type': defendant_type,
-                'complexity': complexity,
-                'claim_amount': claim_amount,
-                'success_rate': success_rate
-            })
-
-        df = pd.DataFrame(samples)
-
-        # Encode features
-        for col in ['case_type', 'jurisdiction', 'defendant_type', 'complexity']:
-            le = LabelEncoder()
-            df[f'{col}_enc'] = le.fit_transform(df[col])
-            self.label_encoders[col] = le
-
-        df['claim_amount_log'] = np.log1p(df['claim_amount'])
-
-        # Train simple model
-        X = df[['case_type_enc', 'jurisdiction_enc', 'defendant_type_enc',
-               'complexity_enc', 'claim_amount_log']]
-        y = df['success_rate']
-
-        self.success_predictor = GradientBoostingRegressor(
-            n_estimators=100,
-            learning_rate=0.1,
-            max_depth=4,
-            random_state=42
-        )
-        self.success_predictor.fit(X, y)
-
-    def get_embeddings(self, texts: List[str]) -> np.ndarray:
-        """Generate embeddings for semantic similarity"""
-        return self.embedding_model.encode(texts, convert_to_numpy=True)
-
-
-# Similar extraction classes from before but with enhanced UI integration
+# Import AI classes from dashboard_ai (with all the fixes)
+# EnhancedAIModelManager removed - using AIModelManager from dashboard_ai instead
 from dashboard_ai import (
+    AIModelManager,
     AICaseExtractor,
     AISemanticDuplicateDetector,
     AISuccessPredictor
@@ -499,7 +412,7 @@ from dashboard_ai import (
 # Initialize
 @st.cache_resource
 def get_ai_manager():
-    return EnhancedAIModelManager()
+    return AIModelManager()
 
 
 if 'cases' not in st.session_state:
