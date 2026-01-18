@@ -1,6 +1,6 @@
 """
 Sablemoore Analytics - Litigation Finance Intelligence Platform
-Streamlit Application
+Streamlit Application with Enhanced ML Engine
 """
 
 import streamlit as st
@@ -17,14 +17,27 @@ import re
 import plotly.express as px
 import plotly.graph_objects as go
 
-# Try to import sklearn, fall back gracefully if not available
+# Import the enhanced ML engine
 try:
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.metrics.pairwise import cosine_similarity
-    from sklearn.ensemble import RandomForestClassifier
-    SKLEARN_AVAILABLE = True
+    from ml_engine import (
+        get_model_manager, get_success_predictor, get_duplicate_detector,
+        EnhancedSuccessPredictor, EnhancedDuplicateDetector, AIModelManager,
+        generate_synthetic_training_data, SKLEARN_AVAILABLE
+    )
+    ML_ENGINE_AVAILABLE = True
 except ImportError:
+    ML_ENGINE_AVAILABLE = False
     SKLEARN_AVAILABLE = False
+
+# Fallback sklearn import if ml_engine not available
+if not ML_ENGINE_AVAILABLE:
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        from sklearn.ensemble import RandomForestClassifier
+        SKLEARN_AVAILABLE = True
+    except ImportError:
+        SKLEARN_AVAILABLE = False
 
 # Page configuration
 st.set_page_config(
@@ -86,6 +99,15 @@ if 'cases' not in st.session_state:
     st.session_state.cases = []
 if 'predictions' not in st.session_state:
     st.session_state.predictions = []
+
+# Initialize ML components
+if ML_ENGINE_AVAILABLE:
+    if 'model_manager' not in st.session_state:
+        st.session_state.model_manager = get_model_manager()
+    if 'success_predictor' not in st.session_state:
+        st.session_state.success_predictor = get_success_predictor()
+    if 'duplicate_detector' not in st.session_state:
+        st.session_state.duplicate_detector = get_duplicate_detector()
 
 
 class CaseExtractor:
@@ -606,6 +628,12 @@ def upload_page():
     """Display upload page"""
     st.subheader("Upload Cases")
 
+    # Get predictor
+    if ML_ENGINE_AVAILABLE:
+        predictor = st.session_state.success_predictor
+    else:
+        predictor = None
+
     # File upload
     uploaded_files = st.file_uploader(
         "Upload case documents",
@@ -616,12 +644,15 @@ def upload_page():
 
     if uploaded_files:
         if st.button("Process Files", type="primary"):
-            with st.spinner("Processing files..."):
+            with st.spinner("Processing files with ML engine..."):
                 for file in uploaded_files:
                     content = file.read().decode('utf-8', errors='ignore')
                     if content.strip():
                         case_data = CaseExtractor.extract_from_text(content)
-                        prediction = SuccessPredictor.predict_success(case_data)
+                        if predictor:
+                            prediction = predictor.predict(case_data)
+                        else:
+                            prediction = SuccessPredictor.predict_success(case_data)
                         st.session_state.cases.append(case_data)
                         st.session_state.predictions.append({
                             'case_id': case_data['case_id'],
@@ -642,9 +673,12 @@ def upload_page():
     )
 
     if st.button("Analyze Case", type="primary") and manual_text.strip():
-        with st.spinner("Analyzing case..."):
+        with st.spinner("Analyzing case with ML engine..."):
             case_data = CaseExtractor.extract_from_text(manual_text)
-            prediction = SuccessPredictor.predict_success(case_data)
+            if predictor:
+                prediction = predictor.predict(case_data)
+            else:
+                prediction = SuccessPredictor.predict_success(case_data)
             st.session_state.cases.append(case_data)
             st.session_state.predictions.append({
                 'case_id': case_data['case_id'],
@@ -654,11 +688,19 @@ def upload_page():
         st.success("Case analyzed successfully!")
 
         # Show results
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("Success Rate", f"{prediction['success_rate']:.1f}%")
         with col2:
             st.metric("Risk Level", prediction['risk_level'])
+        with col3:
+            method = prediction.get('prediction_method', 'rule_based')
+            st.metric("Method", "ML" if 'ml' in method else "Rules")
+
+        # Show confidence interval if available
+        if 'confidence_interval' in prediction:
+            ci = prediction['confidence_interval']
+            st.caption(f"95% Confidence Interval: {ci['low']:.1f}% - {ci['high']:.1f}%")
 
         st.info(prediction['recommendation'])
 
@@ -731,10 +773,18 @@ def analysis_page():
 def duplicates_page():
     """Display duplicate detection page"""
     cases = st.session_state.cases
-    detector = st.session_state.duplicate_detector
+
+    # Get detector from ML engine or fallback
+    if ML_ENGINE_AVAILABLE:
+        detector = st.session_state.duplicate_detector
+    elif 'duplicate_detector' in st.session_state:
+        detector = st.session_state.duplicate_detector
+    else:
+        st.error("Duplicate detector not available")
+        return
 
     st.subheader("ML Duplicate Detection")
-    st.info("🤖 Uses TF-IDF text analysis, cosine similarity, and structured feature comparison to identify potential duplicates.")
+    st.info("🤖 Uses TF-IDF text analysis, cosine similarity, word Jaccard similarity, and Gradient Boosting ML to identify potential duplicates.")
 
     if len(cases) < 2:
         st.warning("Need at least 2 cases to detect duplicates. Upload more cases first.")
@@ -957,6 +1007,112 @@ def export_page():
         )
 
 
+def ml_models_page():
+    """Display ML Models management page"""
+    st.subheader("ML Model Management")
+
+    if not ML_ENGINE_AVAILABLE:
+        st.error("ML Engine not available. Please check dependencies.")
+        return
+
+    model_manager = st.session_state.model_manager
+    success_predictor = st.session_state.success_predictor
+    duplicate_detector = st.session_state.duplicate_detector
+
+    # Model Status Overview
+    st.markdown("### Model Status")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Success Predictor**")
+        status = model_manager.get_model_status()
+
+        if success_predictor.is_trained:
+            st.success("✅ ML Model Trained")
+            st.write(f"Model Type: {status['success_predictor']['model_type']}")
+        else:
+            st.warning("⚠️ Using Rule-Based Predictions")
+            st.caption("Train the model with labeled data for ML predictions")
+
+    with col2:
+        st.markdown("**Duplicate Detector**")
+        dup_stats = duplicate_detector.get_training_stats()
+
+        if dup_stats['is_trained']:
+            st.success("✅ ML Model Trained")
+            st.write(f"Training Examples: {dup_stats['total_examples']}")
+        else:
+            st.warning(f"⚠️ Need {5 - dup_stats['total_examples']} more examples")
+
+    st.markdown("---")
+
+    # Training Section
+    st.markdown("### Train Success Predictor")
+    st.caption("Generate synthetic training data based on UK litigation patterns to bootstrap the ML model.")
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        n_samples = st.slider("Training Samples", 50, 500, 100, step=50)
+
+    with col2:
+        if st.button("Generate & Train", type="primary"):
+            with st.spinner("Generating training data and training model..."):
+                # Generate synthetic data
+                training_data = generate_synthetic_training_data(n_samples)
+
+                # Train the model
+                result = success_predictor.train(training_data)
+
+                if result['success']:
+                    st.success(f"✅ Model trained successfully!")
+                    st.write(f"- Model: {result['model_type']}")
+                    st.write(f"- Samples: {result['training_samples']}")
+                    st.write(f"- CV Accuracy: {result['cv_accuracy']:.2%} (±{result['cv_std']:.2%})")
+                else:
+                    st.error(result['message'])
+
+    st.markdown("---")
+
+    # Model Performance Visualization
+    st.markdown("### Model Insights")
+
+    if success_predictor.is_trained:
+        # Show feature importance if available
+        if hasattr(success_predictor.model, 'feature_importances_'):
+            importances = success_predictor.model.feature_importances_
+            feature_names = success_predictor.feature_names if success_predictor.feature_names else [f"Feature {i}" for i in range(len(importances))]
+
+            fig = px.bar(
+                x=importances,
+                y=feature_names,
+                orientation='h',
+                title="Feature Importance",
+                labels={'x': 'Importance', 'y': 'Feature'}
+            )
+            fig.update_layout(yaxis={'categoryorder': 'total ascending'})
+            st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Train the model to see feature importance analysis")
+
+    # Duplicate Detection Stats
+    st.markdown("### Duplicate Detection Training")
+
+    dup_stats = duplicate_detector.get_training_stats()
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Examples", dup_stats['total_examples'])
+    col2.metric("Marked Duplicates", dup_stats['duplicates'])
+    col3.metric("Non-Duplicates", dup_stats['non_duplicates'])
+
+    if dup_stats['total_examples'] >= 5:
+        st.success("✅ Sufficient data for ML training")
+    else:
+        st.warning(f"Need {5 - dup_stats['total_examples']} more labeled examples for ML training")
+        st.caption("Use the Duplicate Detection page to label potential duplicates")
+
+
 def main():
     """Main application"""
 
@@ -979,16 +1135,24 @@ def main():
 
     st.sidebar.markdown("---")
 
-    # Navigation
+    # Navigation - add ML Models page
     page = st.sidebar.radio(
         "Navigation",
-        ["Dashboard", "Upload Cases", "Case Analysis", "Duplicate Detection", "Portfolio", "Export Reports"],
+        ["Dashboard", "Upload Cases", "Case Analysis", "Duplicate Detection", "Portfolio", "ML Models", "Export Reports"],
         label_visibility="collapsed"
     )
 
     # Stats in sidebar
     st.sidebar.markdown("---")
     st.sidebar.metric("Total Cases", len(st.session_state.cases))
+
+    # ML Status indicator
+    if ML_ENGINE_AVAILABLE:
+        predictor = st.session_state.success_predictor
+        if predictor.is_trained:
+            st.sidebar.success("🤖 ML Active")
+        else:
+            st.sidebar.warning("📊 Rules Mode")
 
     # Clear data button
     if st.sidebar.button("Clear All Data", type="secondary"):
@@ -1012,6 +1176,9 @@ def main():
     elif page == "Portfolio":
         st.title("Portfolio Overview")
         portfolio_page()
+    elif page == "ML Models":
+        st.title("ML Models")
+        ml_models_page()
     elif page == "Export Reports":
         st.title("Export Reports")
         export_page()
