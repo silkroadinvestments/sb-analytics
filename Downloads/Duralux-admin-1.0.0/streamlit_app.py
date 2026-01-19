@@ -784,7 +784,7 @@ def duplicates_page():
         return
 
     st.subheader("ML Duplicate Detection")
-    st.info("🤖 Uses TF-IDF text analysis, cosine similarity, word Jaccard similarity, and Gradient Boosting ML to identify potential duplicates.")
+    st.info("🤖 Enhanced with fuzzy name matching! Now detects misspellings (John/Jon) and name variants (William/Bill) using Soundex, Metaphone, and Levenshtein distance.")
 
     if len(cases) < 2:
         st.warning("Need at least 2 cases to detect duplicates. Upload more cases first.")
@@ -822,12 +822,46 @@ def duplicates_page():
 
                     st.markdown("**Similarity Breakdown:**")
                     feat = dup['features']
-                    cols = st.columns(5)
+                    cols = st.columns(4)
                     cols[0].metric("Text", f"{feat['text_similarity']}%")
                     cols[1].metric("Amount", f"{feat['amount_match']}%")
                     cols[2].metric("Same Type", "✓" if feat['same_type'] else "✗")
                     cols[3].metric("Same Jurisdiction", "✓" if feat['same_jurisdiction'] else "✗")
-                    cols[4].metric("Entity Overlap", f"{feat['entity_overlap']}%")
+
+                    # NEW: Show name matching results
+                    st.markdown("**Name Matching (Fuzzy):**")
+                    name_cols = st.columns(2)
+                    def_match = feat.get('defendant_name_match', 0)
+                    claim_match = feat.get('claimant_name_match', 0)
+                    name_cols[0].metric("Defendant Match", f"{def_match}%",
+                                       delta="High" if def_match >= 70 else ("Medium" if def_match >= 50 else None))
+                    name_cols[1].metric("Claimant Match", f"{claim_match}%",
+                                       delta="High" if claim_match >= 70 else ("Medium" if claim_match >= 50 else None))
+
+                    # Show extracted names if available
+                    if 'name_matches' in dup:
+                        nm = dup['name_matches']
+                        if nm.get('case1_defendants') or nm.get('case2_defendants'):
+                            st.markdown("**Extracted Names:**")
+                            ncol1, ncol2 = st.columns(2)
+                            with ncol1:
+                                st.write(f"Case 1 Defendants: {', '.join(nm.get('case1_defendants', [])) or 'None found'}")
+                                st.write(f"Case 1 Claimants: {', '.join(nm.get('case1_claimants', [])) or 'None found'}")
+                            with ncol2:
+                                st.write(f"Case 2 Defendants: {', '.join(nm.get('case2_defendants', [])) or 'None found'}")
+                                st.write(f"Case 2 Claimants: {', '.join(nm.get('case2_claimants', [])) or 'None found'}")
+
+                        # Show matched names
+                        if nm.get('defendant_matches'):
+                            st.success("**Defendant Name Matches Found:**")
+                            for match in nm['defendant_matches']:
+                                if len(match) >= 3:
+                                    st.write(f"  • '{match[0]}' ↔ '{match[1]}' (Similarity: {match[2]*100:.0f}%)")
+                        if nm.get('claimant_matches'):
+                            st.success("**Claimant Name Matches Found:**")
+                            for match in nm['claimant_matches']:
+                                if len(match) >= 3:
+                                    st.write(f"  • '{match[0]}' ↔ '{match[1]}' (Similarity: {match[2]*100:.0f}%)")
 
                     # Training feedback
                     st.markdown("---")

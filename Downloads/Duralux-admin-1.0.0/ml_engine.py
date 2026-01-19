@@ -9,11 +9,329 @@ import pickle
 import hashlib
 import re
 from datetime import datetime
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Set
 from difflib import SequenceMatcher
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
+
+
+# ============================================================================
+# FUZZY NAME MATCHING UTILITIES
+# ============================================================================
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """
+    Calculate the Levenshtein (edit) distance between two strings.
+    This measures the minimum number of single-character edits needed
+    to transform one string into the other.
+    """
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            # Cost is 0 if characters match, 1 otherwise
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+
+    return previous_row[-1]
+
+
+def soundex(name: str) -> str:
+    """
+    Generate Soundex code for a name - phonetic algorithm for indexing names by sound.
+    Names that sound similar will have the same Soundex code.
+    e.g., "Robert" and "Rupert" both -> R163
+          "John" and "Jon" both -> J500
+    """
+    if not name:
+        return "0000"
+
+    name = name.upper()
+    # Keep first letter
+    soundex_code = name[0]
+
+    # Soundex coding map
+    coding = {
+        'B': '1', 'F': '1', 'P': '1', 'V': '1',
+        'C': '2', 'G': '2', 'J': '2', 'K': '2', 'Q': '2', 'S': '2', 'X': '2', 'Z': '2',
+        'D': '3', 'T': '3',
+        'L': '4',
+        'M': '5', 'N': '5',
+        'R': '6'
+    }
+
+    # Process remaining characters
+    prev_code = coding.get(name[0], '0')
+    for char in name[1:]:
+        code = coding.get(char, '0')
+        if code != '0' and code != prev_code:
+            soundex_code += code
+        prev_code = code
+        if len(soundex_code) == 4:
+            break
+
+    # Pad with zeros if needed
+    soundex_code = soundex_code.ljust(4, '0')
+    return soundex_code[:4]
+
+
+def metaphone(name: str) -> str:
+    """
+    Simple Metaphone algorithm - another phonetic algorithm that's often
+    more accurate than Soundex for English names.
+    """
+    if not name:
+        return ""
+
+    name = name.upper()
+    result = []
+
+    # Simple transformation rules
+    replacements = [
+        ('GH', ''), ('GN', 'N'), ('KN', 'N'), ('PN', 'N'), ('WR', 'R'),
+        ('PS', 'S'), ('PH', 'F'), ('CK', 'K'), ('SCH', 'SK'), ('GHT', 'T'),
+        ('DG', 'J'), ('TCH', 'CH'), ('SH', 'X'), ('CH', 'X'), ('TH', '0'),
+        ('X', 'KS'), ('QU', 'KW'), ('Q', 'K'), ('Z', 'S'), ('V', 'F'),
+        ('W', ''), ('Y', ''),
+    ]
+
+    for old, new in replacements:
+        name = name.replace(old, new)
+
+    # Remove duplicate adjacent letters
+    prev = ''
+    for char in name:
+        if char != prev:
+            result.append(char)
+        prev = char
+
+    # Remove vowels except at start
+    if result:
+        first = result[0]
+        result = [first] + [c for c in result[1:] if c not in 'AEIOU']
+
+    return ''.join(result)
+
+
+class NameMatcher:
+    """
+    Advanced name matching class that handles:
+    - Fuzzy matching for misspellings (John vs Jon)
+    - Phonetic matching for similar-sounding names
+    - First name + surname separate comparison
+    - Common nickname/variant handling
+    """
+
+    # Common name variants/nicknames
+    NAME_VARIANTS = {
+        'william': ['will', 'bill', 'billy', 'willy', 'liam'],
+        'robert': ['rob', 'bob', 'bobby', 'robbie', 'bert'],
+        'richard': ['rich', 'rick', 'dick', 'ricky'],
+        'james': ['jim', 'jimmy', 'jamie'],
+        'john': ['jon', 'johnny', 'jack'],
+        'jonathan': ['jon', 'john', 'johnny', 'nathan'],
+        'michael': ['mike', 'mick', 'mikey'],
+        'christopher': ['chris', 'kit'],
+        'nicholas': ['nick', 'nicky', 'nicolas'],
+        'steven': ['steve', 'stephen', 'stefan'],
+        'stephen': ['steve', 'steven', 'stefan'],
+        'thomas': ['tom', 'tommy', 'thom'],
+        'anthony': ['tony', 'ant'],
+        'andrew': ['andy', 'drew'],
+        'matthew': ['matt', 'matty'],
+        'daniel': ['dan', 'danny'],
+        'david': ['dave', 'davey'],
+        'joseph': ['joe', 'joey', 'jo'],
+        'edward': ['ed', 'eddie', 'ted', 'teddy', 'ned'],
+        'charles': ['charlie', 'chuck', 'chas'],
+        'benjamin': ['ben', 'benny', 'benji'],
+        'alexander': ['alex', 'al', 'sandy', 'xander'],
+        'elizabeth': ['liz', 'lizzy', 'beth', 'betty', 'eliza', 'libby'],
+        'margaret': ['maggie', 'meg', 'marge', 'peggy', 'rita'],
+        'katherine': ['kate', 'kathy', 'katie', 'cathy', 'kit'],
+        'catherine': ['kate', 'kathy', 'katie', 'cathy', 'cat'],
+        'jennifer': ['jen', 'jenny'],
+        'patricia': ['pat', 'patty', 'tricia'],
+        'barbara': ['barb', 'babs'],
+        'susan': ['sue', 'susie', 'suzy'],
+        'rebecca': ['becky', 'becca', 'reba'],
+        'samantha': ['sam', 'sammy'],
+        'victoria': ['vicky', 'vic', 'tori'],
+        'deborah': ['deb', 'debbie'],
+        'dorothy': ['dot', 'dotty', 'dora'],
+        'gerald': ['gerry', 'jerry'],
+        'geoffrey': ['geoff', 'jeff'],
+        'jeffrey': ['jeff', 'geoff'],
+        'peter': ['pete'],
+        'philip': ['phil'],
+        'lawrence': ['larry', 'laurie'],
+        'raymond': ['ray'],
+        'ronald': ['ron', 'ronnie'],
+        'timothy': ['tim', 'timmy'],
+        'gregory': ['greg'],
+        'patrick': ['pat', 'paddy'],
+        'henry': ['harry', 'hank'],
+        'frederick': ['fred', 'freddy', 'fritz'],
+        'albert': ['al', 'bert', 'bertie'],
+        'arthur': ['art', 'artie'],
+        'harold': ['harry', 'hal'],
+        'samuel': ['sam', 'sammy'],
+        'nathan': ['nate', 'nat'],
+        'francis': ['frank', 'fran'],
+        'frank': ['francis', 'frankie'],
+    }
+
+    def __init__(self):
+        # Build reverse lookup for variants
+        self.variant_lookup = defaultdict(set)
+        for canonical, variants in self.NAME_VARIANTS.items():
+            self.variant_lookup[canonical].add(canonical)
+            for v in variants:
+                self.variant_lookup[canonical].add(v)
+                self.variant_lookup[v].add(canonical)
+                for v2 in variants:
+                    self.variant_lookup[v].add(v2)
+
+    def normalize_name(self, name: str) -> str:
+        """Normalize a name for comparison"""
+        if not name:
+            return ""
+        # Remove titles, punctuation, extra spaces
+        name = re.sub(r'\b(mr|mrs|ms|miss|dr|prof|sir|dame|lord|lady)\.?\b', '', name.lower())
+        name = re.sub(r'[^\w\s]', '', name)
+        name = ' '.join(name.split())
+        return name.strip()
+
+    def split_name(self, full_name: str) -> Tuple[str, str]:
+        """Split full name into first name and surname"""
+        parts = self.normalize_name(full_name).split()
+        if len(parts) == 0:
+            return ('', '')
+        elif len(parts) == 1:
+            return (parts[0], '')
+        else:
+            # First name is first part, surname is last part
+            # (handles middle names by ignoring them)
+            return (parts[0], parts[-1])
+
+    def are_name_variants(self, name1: str, name2: str) -> bool:
+        """Check if two names are known variants of each other"""
+        n1 = name1.lower().strip()
+        n2 = name2.lower().strip()
+
+        if n1 == n2:
+            return True
+
+        # Check direct variant lookup
+        if n2 in self.variant_lookup.get(n1, set()):
+            return True
+        if n1 in self.variant_lookup.get(n2, set()):
+            return True
+
+        return False
+
+    def name_similarity(self, name1: str, name2: str, max_distance: int = 2) -> float:
+        """
+        Calculate similarity between two names.
+        Returns a score from 0.0 (no match) to 1.0 (exact/variant match).
+
+        Considers:
+        - Exact match
+        - Known variants (John/Jon, William/Bill)
+        - Phonetic similarity (Soundex/Metaphone)
+        - Edit distance (for misspellings within max_distance)
+        """
+        n1 = self.normalize_name(name1)
+        n2 = self.normalize_name(name2)
+
+        if not n1 or not n2:
+            return 0.0
+
+        # Exact match
+        if n1 == n2:
+            return 1.0
+
+        # Known variant
+        if self.are_name_variants(n1, n2):
+            return 0.95
+
+        # Phonetic match (Soundex)
+        if soundex(n1) == soundex(n2):
+            return 0.85
+
+        # Phonetic match (Metaphone)
+        if metaphone(n1) == metaphone(n2):
+            return 0.80
+
+        # Edit distance check
+        distance = levenshtein_distance(n1, n2)
+        max_len = max(len(n1), len(n2))
+
+        if distance <= max_distance:
+            # Within allowed edit distance - likely misspelling
+            # Score decreases with distance
+            return max(0.70, 1.0 - (distance / max_len))
+
+        # Partial match (one name contains the other)
+        if n1 in n2 or n2 in n1:
+            shorter = min(len(n1), len(n2))
+            longer = max(len(n1), len(n2))
+            return 0.60 * (shorter / longer)
+
+        # No strong match
+        return 0.0
+
+    def full_name_similarity(self, full_name1: str, full_name2: str) -> Tuple[float, Dict]:
+        """
+        Compare two full names, handling first name and surname separately.
+
+        Returns:
+        - Overall similarity score (0.0 to 1.0)
+        - Dictionary with detailed breakdown
+        """
+        first1, last1 = self.split_name(full_name1)
+        first2, last2 = self.split_name(full_name2)
+
+        details = {
+            'first_name_1': first1,
+            'first_name_2': first2,
+            'surname_1': last1,
+            'surname_2': last2,
+            'first_name_similarity': 0.0,
+            'surname_similarity': 0.0,
+        }
+
+        # Calculate individual similarities
+        if first1 and first2:
+            details['first_name_similarity'] = self.name_similarity(first1, first2)
+
+        if last1 and last2:
+            details['surname_similarity'] = self.name_similarity(last1, last2)
+
+        # Overall score: surname is more important for matching
+        # Weights: surname 60%, first name 40%
+        if last1 and last2 and first1 and first2:
+            overall = (details['surname_similarity'] * 0.6) + (details['first_name_similarity'] * 0.4)
+        elif last1 and last2:
+            overall = details['surname_similarity']
+        elif first1 and first2:
+            overall = details['first_name_similarity'] * 0.7  # Less confident with only first name
+        else:
+            overall = 0.0
+
+        details['overall_similarity'] = overall
+        return overall, details
 
 # ML imports with fallback
 try:
@@ -476,7 +794,7 @@ class EnhancedSuccessPredictor:
 class EnhancedDuplicateDetector:
     """
     ML-powered duplicate detection using TF-IDF, semantic similarity,
-    and structured feature comparison.
+    and structured feature comparison with enhanced name matching.
     """
 
     def __init__(self, model_manager: Optional[AIModelManager] = None):
@@ -484,6 +802,9 @@ class EnhancedDuplicateDetector:
         self.classifier = None
         self.is_trained = False
         self.training_data = []
+
+        # Name matcher for fuzzy name comparison
+        self.name_matcher = NameMatcher()
 
         # TF-IDF vectorizer
         if SKLEARN_AVAILABLE:
@@ -574,6 +895,187 @@ class EnhancedDuplicateDetector:
 
         return intersection / union if union > 0 else 0.0
 
+    def _extract_party_names(self, text: str) -> Dict[str, List[str]]:
+        """
+        Extract defendant and claimant names from case text.
+        Uses multiple patterns to identify party names in legal documents.
+
+        Returns dict with 'defendants' and 'claimants' lists.
+        """
+        defendants = []
+        claimants = []
+
+        if not text:
+            return {'defendants': defendants, 'claimants': claimants}
+
+        # Pattern 1: "Claimant: Name" or "Claimant - Name" format
+        claimant_patterns = [
+            r'claimant[:\s\-]+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'claimants?[:\s\-]+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'plaintiff[:\s\-]+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'plaintiffs?[:\s\-]+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'(?:Mr|Mrs|Ms|Miss|Dr)\.?\s+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+(?:brings|brought|claims|claimed|sues|sued)',
+            r'([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+(?:v\.?|vs\.?|versus)\s+',
+            r'the claimant,?\s+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+\(claimant\)',
+            r'([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+\(the claimant\)',
+        ]
+
+        # Pattern 2: "Defendant: Name" or "Defendant - Name" format
+        defendant_patterns = [
+            r'defendant[:\s\-]+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'defendants?[:\s\-]+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'respondent[:\s\-]+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'respondents?[:\s\-]+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'(?:v\.?|vs\.?|versus)\s+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'against\s+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'the defendant,?\s+([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)',
+            r'([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+\(defendant\)',
+            r'([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)*)\s+\(the defendant\)',
+        ]
+
+        # Common words to exclude (not names)
+        exclude_words = {
+            'the', 'court', 'judge', 'claim', 'case', 'action', 'proceedings',
+            'claimant', 'defendant', 'plaintiff', 'respondent', 'this', 'that',
+            'high', 'county', 'supreme', 'appeal', 'tribunal', 'employment',
+            'contract', 'dispute', 'injury', 'personal', 'negligence', 'fraud',
+            'commercial', 'property', 'recovery', 'debt', 'intellectual',
+            'professional', 'civil', 'litigation', 'matter', 'application',
+            'order', 'judgment', 'decision', 'hearing', 'trial', 'evidence',
+            'witness', 'expert', 'damages', 'costs', 'claim', 'amount'
+        }
+
+        # Extract claimants
+        for pattern in claimant_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                name = match.strip()
+                # Filter out non-names
+                if name and len(name) > 2:
+                    name_words = name.lower().split()
+                    if not any(w in exclude_words for w in name_words):
+                        claimants.append(name)
+
+        # Extract defendants
+        for pattern in defendant_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            for match in matches:
+                name = match.strip()
+                # Filter out non-names
+                if name and len(name) > 2:
+                    name_words = name.lower().split()
+                    if not any(w in exclude_words for w in name_words):
+                        defendants.append(name)
+
+        # Also try to extract from structured data format (if present)
+        # Pattern: "Name: John Smith" after Claimant/Defendant header
+        structured_pattern = r'(?:claimant|plaintiff)\s*(?:name)?[:\s]*([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)+)'
+        matches = re.findall(structured_pattern, text, re.IGNORECASE)
+        claimants.extend([m.strip() for m in matches if m.strip() and len(m.strip()) > 2])
+
+        structured_pattern = r'(?:defendant|respondent)\s*(?:name)?[:\s]*([A-Z][a-zA-Z\'\-]+(?:\s+[A-Z][a-zA-Z\'\-]+)+)'
+        matches = re.findall(structured_pattern, text, re.IGNORECASE)
+        defendants.extend([m.strip() for m in matches if m.strip() and len(m.strip()) > 2])
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_claimants = []
+        for c in claimants:
+            c_lower = c.lower()
+            if c_lower not in seen:
+                seen.add(c_lower)
+                unique_claimants.append(c)
+
+        seen = set()
+        unique_defendants = []
+        for d in defendants:
+            d_lower = d.lower()
+            if d_lower not in seen:
+                seen.add(d_lower)
+                unique_defendants.append(d)
+
+        return {
+            'defendants': unique_defendants,
+            'claimants': unique_claimants
+        }
+
+    def _calculate_party_name_similarity(self, case1: Dict, case2: Dict) -> Dict[str, float]:
+        """
+        Calculate similarity between party names (defendants and claimants) in two cases.
+        Uses fuzzy matching to handle misspellings and name variants.
+
+        Returns dict with defendant_similarity, claimant_similarity, and best matches.
+        """
+        # First check if names are provided in case metadata
+        def1_names = case1.get('defendant_names', [])
+        def2_names = case2.get('defendant_names', [])
+        claim1_names = case1.get('claimant_names', [])
+        claim2_names = case2.get('claimant_names', [])
+
+        # If not in metadata, extract from text
+        if not def1_names or not claim1_names:
+            extracted1 = self._extract_party_names(case1.get('raw_text', ''))
+            if not def1_names:
+                def1_names = extracted1['defendants']
+            if not claim1_names:
+                claim1_names = extracted1['claimants']
+
+        if not def2_names or not claim2_names:
+            extracted2 = self._extract_party_names(case2.get('raw_text', ''))
+            if not def2_names:
+                def2_names = extracted2['defendants']
+            if not claim2_names:
+                claim2_names = extracted2['claimants']
+
+        result = {
+            'defendant_similarity': 0.0,
+            'claimant_similarity': 0.0,
+            'defendant_matches': [],
+            'claimant_matches': [],
+            'case1_defendants': def1_names,
+            'case2_defendants': def2_names,
+            'case1_claimants': claim1_names,
+            'case2_claimants': claim2_names
+        }
+
+        # Calculate defendant similarity
+        if def1_names and def2_names:
+            max_similarities = []
+            for name1 in def1_names:
+                best_sim = 0.0
+                best_match = None
+                for name2 in def2_names:
+                    sim, details = self.name_matcher.full_name_similarity(name1, name2)
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_match = (name1, name2, sim, details)
+                max_similarities.append(best_sim)
+                if best_match and best_sim >= 0.6:
+                    result['defendant_matches'].append(best_match)
+
+            # Average of best matches (each name finds its best match)
+            result['defendant_similarity'] = sum(max_similarities) / len(max_similarities) if max_similarities else 0.0
+
+        # Calculate claimant similarity
+        if claim1_names and claim2_names:
+            max_similarities = []
+            for name1 in claim1_names:
+                best_sim = 0.0
+                best_match = None
+                for name2 in claim2_names:
+                    sim, details = self.name_matcher.full_name_similarity(name1, name2)
+                    if sim > best_sim:
+                        best_sim = sim
+                        best_match = (name1, name2, sim, details)
+                max_similarities.append(best_sim)
+                if best_match and best_sim >= 0.6:
+                    result['claimant_matches'].append(best_match)
+
+            result['claimant_similarity'] = sum(max_similarities) / len(max_similarities) if max_similarities else 0.0
+
+        return result
+
     def _extract_features(self, case1: Dict, case2: Dict) -> Dict:
         """Extract comprehensive comparison features between two cases"""
         features = {}
@@ -640,25 +1142,64 @@ class EnhancedDuplicateDetector:
         else:
             features['length_ratio'] = 0.0
 
+        # *** NEW: Party name similarity with fuzzy matching ***
+        party_sim = self._calculate_party_name_similarity(case1, case2)
+        features['defendant_name_similarity'] = party_sim['defendant_similarity']
+        features['claimant_name_similarity'] = party_sim['claimant_similarity']
+
+        # Store match details for reporting (not used in scoring)
+        features['_defendant_matches'] = party_sim.get('defendant_matches', [])
+        features['_claimant_matches'] = party_sim.get('claimant_matches', [])
+        features['_case1_defendants'] = party_sim.get('case1_defendants', [])
+        features['_case2_defendants'] = party_sim.get('case2_defendants', [])
+        features['_case1_claimants'] = party_sim.get('case1_claimants', [])
+        features['_case2_claimants'] = party_sim.get('case2_claimants', [])
+
         return features
 
     def _calculate_composite_score(self, features: Dict) -> float:
-        """Calculate weighted composite similarity score"""
+        """
+        Calculate weighted composite similarity score.
+
+        Updated weights to prioritize name matching:
+        - Defendant/claimant name similarity now has HIGH weight (0.20 + 0.15 = 0.35 total)
+        - If names match strongly, this is a strong signal of duplicate
+        """
         weights = {
-            'tfidf_similarity': 0.25,
-            'sequence_similarity': 0.12,
-            'word_jaccard': 0.13,
-            'amount_ratio': 0.12,
-            'same_case_type': 0.10,
-            'same_jurisdiction': 0.08,
-            'same_defendant_type': 0.06,
-            'same_complexity': 0.04,
-            'duration_ratio': 0.04,
-            'entity_overlap': 0.04,
-            'length_ratio': 0.02
+            # Party name matching (NEW - high priority)
+            'defendant_name_similarity': 0.20,  # Same defendant is strong signal
+            'claimant_name_similarity': 0.15,   # Same claimant also important
+
+            # Text similarity
+            'tfidf_similarity': 0.15,           # Reduced from 0.25
+            'sequence_similarity': 0.08,        # Reduced from 0.12
+            'word_jaccard': 0.10,               # Reduced from 0.13
+
+            # Case characteristics
+            'amount_ratio': 0.08,               # Reduced from 0.12
+            'same_case_type': 0.08,             # Reduced from 0.10
+            'same_jurisdiction': 0.06,          # Reduced from 0.08
+            'same_defendant_type': 0.04,        # Reduced from 0.06
+            'same_complexity': 0.02,            # Reduced from 0.04
+            'duration_ratio': 0.02,             # Reduced from 0.04
+            'entity_overlap': 0.02,             # Reduced from 0.04
+            'length_ratio': 0.00                # Removed - not useful
         }
 
         score = sum(features.get(k, 0) * v for k, v in weights.items())
+
+        # Boost score if strong name match found
+        # If both defendant AND claimant match well (>0.7), boost significantly
+        def_sim = features.get('defendant_name_similarity', 0)
+        claim_sim = features.get('claimant_name_similarity', 0)
+
+        if def_sim >= 0.7 and claim_sim >= 0.7:
+            # Both parties match - very likely duplicate
+            score = min(1.0, score * 1.3)
+        elif def_sim >= 0.8 or claim_sim >= 0.8:
+            # At least one party has excellent match
+            score = min(1.0, score * 1.15)
+
         return score
 
     def find_duplicates(self, cases: List[Dict], threshold: float = 0.55) -> List[Dict]:
@@ -704,7 +1245,19 @@ class EnhancedDuplicateDetector:
                             'amount_match': round(features['amount_ratio'] * 100, 1),
                             'same_type': features['same_case_type'] == 1.0,
                             'same_jurisdiction': features['same_jurisdiction'] == 1.0,
-                            'entity_overlap': round(features['entity_overlap'] * 100, 1)
+                            'entity_overlap': round(features['entity_overlap'] * 100, 1),
+                            # NEW: Name matching features
+                            'defendant_name_match': round(features.get('defendant_name_similarity', 0) * 100, 1),
+                            'claimant_name_match': round(features.get('claimant_name_similarity', 0) * 100, 1),
+                        },
+                        # NEW: Detailed name matching info
+                        'name_matches': {
+                            'defendant_matches': features.get('_defendant_matches', []),
+                            'claimant_matches': features.get('_claimant_matches', []),
+                            'case1_defendants': features.get('_case1_defendants', []),
+                            'case2_defendants': features.get('_case2_defendants', []),
+                            'case1_claimants': features.get('_case1_claimants', []),
+                            'case2_claimants': features.get('_case2_claimants', []),
                         },
                         'confidence': confidence,
                         'case_1_details': cases[i],
