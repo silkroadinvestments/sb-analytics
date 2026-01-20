@@ -1157,67 +1157,184 @@ class EnhancedDuplicateDetector:
 
         return features
 
-    def _calculate_composite_score(self, features: Dict) -> float:
+    def _calculate_composite_score(self, features: Dict) -> Tuple[float, bool]:
         """
-        Calculate weighted composite similarity score.
+        Calculate weighted composite similarity score with strict requirements.
 
-        Updated weights to prioritize name matching:
-        - Defendant/claimant name similarity now has HIGH weight (0.20 + 0.15 = 0.35 total)
-        - If names match strongly, this is a strong signal of duplicate
+        Returns:
+            Tuple of (score, passes_minimum_requirements)
+
+        A case pair must have at least ONE strong signal to be considered:
+        - High text similarity (>50%) OR
+        - Strong name match (defendant OR claimant >60%) OR
+        - Very high amount match (>95%) with same case type
+
+        This prevents false positives from categorical matches alone.
         """
+        # Extract key similarity metrics
+        tfidf_sim = features.get('tfidf_similarity', 0)
+        sequence_sim = features.get('sequence_similarity', 0)
+        word_jaccard = features.get('word_jaccard', 0)
+        def_sim = features.get('defendant_name_similarity', 0)
+        claim_sim = features.get('claimant_name_similarity', 0)
+        amount_ratio = features.get('amount_ratio', 0)
+        same_type = features.get('same_case_type', 0)
+        entity_overlap = features.get('entity_overlap', 0)
+
+        # ============================================================
+        # MINIMUM REQUIREMENTS - Must pass at least one to be considered
+        # ============================================================
+        passes_minimum = False
+
+        # Requirement 1: High text similarity (actual content overlap)
+        if tfidf_sim >= 0.50 or sequence_sim >= 0.40 or word_jaccard >= 0.35:
+            passes_minimum = True
+
+        # Requirement 2: Strong party name match
+        if def_sim >= 0.60 or claim_sim >= 0.60:
+            passes_minimum = True
+
+        # Requirement 3: Both defendant AND claimant have moderate match
+        if def_sim >= 0.40 and claim_sim >= 0.40:
+            passes_minimum = True
+
+        # Requirement 4: Very high amount match with same case type AND entity overlap
+        if amount_ratio >= 0.95 and same_type == 1.0 and entity_overlap >= 0.20:
+            passes_minimum = True
+
+        # Requirement 5: High entity overlap (actual name/company matches in text)
+        if entity_overlap >= 0.40:
+            passes_minimum = True
+
+        # If no minimum requirement is met, return 0
+        if not passes_minimum:
+            return 0.0, False
+
+        # ============================================================
+        # SCORING - Only if minimum requirements are met
+        # ============================================================
+        # Weights heavily favor actual content/name similarity over categorical matches
         weights = {
-            # Party name matching (NEW - high priority)
-            'defendant_name_similarity': 0.20,  # Same defendant is strong signal
-            'claimant_name_similarity': 0.15,   # Same claimant also important
+            # Primary signals (high weight - these indicate actual duplicates)
+            'tfidf_similarity': 0.25,           # Text content match
+            'defendant_name_similarity': 0.20,  # Same defendant
+            'claimant_name_similarity': 0.15,   # Same claimant
+            'entity_overlap': 0.10,             # Named entities in text
 
-            # Text similarity
-            'tfidf_similarity': 0.15,           # Reduced from 0.25
-            'sequence_similarity': 0.08,        # Reduced from 0.12
-            'word_jaccard': 0.10,               # Reduced from 0.13
+            # Secondary signals (moderate weight)
+            'sequence_similarity': 0.08,        # Character-level similarity
+            'word_jaccard': 0.07,               # Word overlap
+            'amount_ratio': 0.05,               # Similar amounts
 
-            # Case characteristics
-            'amount_ratio': 0.08,               # Reduced from 0.12
-            'same_case_type': 0.08,             # Reduced from 0.10
-            'same_jurisdiction': 0.06,          # Reduced from 0.08
-            'same_defendant_type': 0.04,        # Reduced from 0.06
-            'same_complexity': 0.02,            # Reduced from 0.04
-            'duration_ratio': 0.02,             # Reduced from 0.04
-            'entity_overlap': 0.02,             # Reduced from 0.04
+            # Weak signals (low weight - too many false positives alone)
+            'same_case_type': 0.04,             # Same type (common)
+            'same_jurisdiction': 0.03,          # Same jurisdiction (common)
+            'same_defendant_type': 0.02,        # Same defendant type (very common)
+            'same_complexity': 0.01,            # Same complexity (not very meaningful)
+            'duration_ratio': 0.00,             # Removed - not useful
             'length_ratio': 0.00                # Removed - not useful
         }
 
         score = sum(features.get(k, 0) * v for k, v in weights.items())
 
-        # Boost score if strong name match found
-        # If both defendant AND claimant match well (>0.7), boost significantly
-        def_sim = features.get('defendant_name_similarity', 0)
-        claim_sim = features.get('claimant_name_similarity', 0)
-
-        if def_sim >= 0.7 and claim_sim >= 0.7:
-            # Both parties match - very likely duplicate
-            score = min(1.0, score * 1.3)
-        elif def_sim >= 0.8 or claim_sim >= 0.8:
+        # Boost score for strong name matches (these are high-confidence signals)
+        if def_sim >= 0.80 and claim_sim >= 0.80:
+            # Both parties match strongly - very likely duplicate
+            score = min(1.0, score * 1.4)
+        elif def_sim >= 0.70 and claim_sim >= 0.70:
+            # Both parties match well
+            score = min(1.0, score * 1.25)
+        elif def_sim >= 0.80 or claim_sim >= 0.80:
             # At least one party has excellent match
             score = min(1.0, score * 1.15)
 
-        return score
+        # Boost for very high text similarity (strong content match)
+        if tfidf_sim >= 0.70:
+            score = min(1.0, score * 1.2)
 
-    def find_duplicates(self, cases: List[Dict], threshold: float = 0.55) -> List[Dict]:
-        """Find potential duplicates using ML features"""
+        return score, True
+
+    def find_duplicates(self, cases: List[Dict], threshold: float = 0.65,
+                        filter_by_party: bool = False, party_threshold: float = 0.50) -> List[Dict]:
+        """
+        Find potential duplicates using ML features.
+
+        Args:
+            cases: List of case dictionaries
+            threshold: Minimum similarity score (default 0.65 = 65%)
+                       Higher thresholds = fewer but more confident matches
+            filter_by_party: If True, only compare cases that share similar party names
+                            This dramatically reduces false positives
+            party_threshold: Minimum party name similarity to consider (default 0.50)
+
+        Returns:
+            List of potential duplicate pairs with similarity scores
+        """
         if len(cases) < 2:
             return []
 
         duplicates = []
 
+        # Pre-extract party names for all cases if filtering by party
+        if filter_by_party:
+            case_parties = {}
+            for case in cases:
+                parties = self._extract_party_names(case.get('raw_text', ''))
+                case_parties[case['case_id']] = {
+                    'defendants': parties['defendants'],
+                    'claimants': parties['claimants']
+                }
+
         for i in range(len(cases)):
             for j in range(i + 1, len(cases)):
+                # If filtering by party, check party similarity FIRST (fast check)
+                if filter_by_party:
+                    parties_i = case_parties[cases[i]['case_id']]
+                    parties_j = case_parties[cases[j]['case_id']]
+
+                    # Quick check: do any parties potentially match?
+                    has_party_overlap = False
+
+                    # Check defendants
+                    for def1 in parties_i['defendants']:
+                        for def2 in parties_j['defendants']:
+                            sim, _ = self.name_matcher.full_name_similarity(def1, def2)
+                            if sim >= party_threshold:
+                                has_party_overlap = True
+                                break
+                        if has_party_overlap:
+                            break
+
+                    # Check claimants if no defendant match
+                    if not has_party_overlap:
+                        for clm1 in parties_i['claimants']:
+                            for clm2 in parties_j['claimants']:
+                                sim, _ = self.name_matcher.full_name_similarity(clm1, clm2)
+                                if sim >= party_threshold:
+                                    has_party_overlap = True
+                                    break
+                            if has_party_overlap:
+                                break
+
+                    # Skip this pair if no party overlap found
+                    if not has_party_overlap:
+                        continue
+
+                # Full feature extraction (only if we passed party filter)
                 features = self._extract_features(cases[i], cases[j])
-                composite_score = self._calculate_composite_score(features)
+                composite_score, passes_minimum = self._calculate_composite_score(features)
+
+                # Skip if doesn't pass minimum requirements
+                if not passes_minimum:
+                    continue
 
                 # Use trained classifier if available
                 if self.is_trained and self.classifier is not None:
                     try:
-                        feature_vector = np.array([list(features.values())]).reshape(1, -1)
+                        # Only use numeric features for classifier
+                        numeric_features = {k: v for k, v in features.items()
+                                          if not k.startswith('_') and isinstance(v, (int, float))}
+                        feature_vector = np.array([list(numeric_features.values())]).reshape(1, -1)
                         ml_prob = self.classifier.predict_proba(feature_vector)[0][1]
                         # Blend ML and rule-based
                         final_score = (ml_prob * 0.6) + (composite_score * 0.4)
@@ -1227,10 +1344,10 @@ class EnhancedDuplicateDetector:
                     final_score = composite_score
 
                 if final_score >= threshold:
-                    # Determine confidence level
-                    if final_score >= 0.80:
+                    # Determine confidence level (stricter thresholds)
+                    if final_score >= 0.85:
                         confidence = 'High'
-                    elif final_score >= 0.65:
+                    elif final_score >= 0.72:
                         confidence = 'Medium'
                     else:
                         confidence = 'Low'

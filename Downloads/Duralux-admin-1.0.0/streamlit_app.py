@@ -1,6 +1,8 @@
 """
 Sablemoore Analytics - Litigation Finance Intelligence Platform
-Streamlit Application with Enhanced ML Engine
+Streamlit Application with AI Agent and Enhanced ML Engine
+
+This app can be deployed to Streamlit Cloud for hosting.
 """
 
 import streamlit as st
@@ -28,6 +30,20 @@ try:
 except ImportError:
     ML_ENGINE_AVAILABLE = False
     SKLEARN_AVAILABLE = False
+
+# Import AI Assistant
+try:
+    from ai_assistant import get_ai_assistant, AIAssistant
+    AI_ASSISTANT_AVAILABLE = True
+except ImportError:
+    AI_ASSISTANT_AVAILABLE = False
+
+# Import AI Agent
+try:
+    from ai_agent import get_ai_agent, get_intelligent_duplicate_detector, LitigationAIAgent
+    AI_AGENT_AVAILABLE = True
+except ImportError:
+    AI_AGENT_AVAILABLE = False
 
 # Fallback sklearn import if ml_engine not available
 if not ML_ENGINE_AVAILABLE:
@@ -81,6 +97,23 @@ st.markdown("""
     .stButton>button:hover {
         background-color: #0b5ed7;
     }
+    .chat-message {
+        padding: 1rem;
+        border-radius: 10px;
+        margin-bottom: 1rem;
+    }
+    .user-message {
+        background-color: #e3f2fd;
+        border-left: 4px solid #2196f3;
+    }
+    .agent-message {
+        background-color: #f5f5f5;
+        border-left: 4px solid #4caf50;
+    }
+    .confidence-definite { color: #d32f2f; font-weight: bold; }
+    .confidence-likely { color: #f57c00; font-weight: bold; }
+    .confidence-possible { color: #1976d2; }
+    .confidence-unlikely { color: #757575; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -99,6 +132,8 @@ if 'cases' not in st.session_state:
     st.session_state.cases = []
 if 'predictions' not in st.session_state:
     st.session_state.predictions = []
+if 'chat_history' not in st.session_state:
+    st.session_state.chat_history = []
 
 # Initialize ML components
 if ML_ENGINE_AVAILABLE:
@@ -108,6 +143,18 @@ if ML_ENGINE_AVAILABLE:
         st.session_state.success_predictor = get_success_predictor()
     if 'duplicate_detector' not in st.session_state:
         st.session_state.duplicate_detector = get_duplicate_detector()
+
+# Initialize AI Assistant
+if AI_ASSISTANT_AVAILABLE:
+    if 'ai_assistant' not in st.session_state:
+        st.session_state.ai_assistant = get_ai_assistant()
+
+# Initialize AI Agent
+if AI_AGENT_AVAILABLE:
+    if 'ai_agent' not in st.session_state:
+        st.session_state.ai_agent = get_ai_agent()
+    if 'intelligent_detector' not in st.session_state:
+        st.session_state.intelligent_detector = get_intelligent_duplicate_detector()
 
 
 class CaseExtractor:
@@ -238,181 +285,6 @@ class CaseExtractor:
             return int(np.random.randint(9, 18))
 
 
-class MLDuplicateDetector:
-    """ML-powered duplicate detection"""
-
-    def __init__(self):
-        if SKLEARN_AVAILABLE:
-            self.vectorizer = TfidfVectorizer(
-                max_features=5000,
-                stop_words='english',
-                ngram_range=(1, 3),
-                min_df=1
-            )
-        self.classifier = None
-        self.is_trained = False
-        self.training_data = []
-
-    def _preprocess_text(self, text: str) -> str:
-        """Clean and preprocess text for comparison"""
-        text = text.lower()
-        text = re.sub(r'[^\w\s£$€]', ' ', text)
-        text = re.sub(r'\s+', ' ', text)
-        text = re.sub(r'\b\d{1,2}/\d{1,2}/\d{2,4}\b', ' DATE ', text)
-        text = re.sub(r'£[\d,]+\.?\d*', ' AMOUNT ', text)
-        return text.strip()
-
-    def _extract_features(self, case1: Dict, case2: Dict) -> Dict:
-        """Extract comparison features between two cases"""
-        features = {}
-
-        text1 = self._preprocess_text(case1.get('raw_text', ''))
-        text2 = self._preprocess_text(case2.get('raw_text', ''))
-
-        if SKLEARN_AVAILABLE and text1 and text2:
-            try:
-                tfidf_matrix = self.vectorizer.fit_transform([text1, text2])
-                features['tfidf_similarity'] = cosine_similarity(tfidf_matrix[0:1], tfidf_matrix[1:2])[0][0]
-            except:
-                features['tfidf_similarity'] = 0.0
-        else:
-            features['tfidf_similarity'] = 0.0
-
-        features['sequence_similarity'] = SequenceMatcher(None, text1[:1000], text2[:1000]).ratio()
-
-        amount1 = case1.get('claim_amount', 0)
-        amount2 = case2.get('claim_amount', 0)
-        if amount1 > 0 and amount2 > 0:
-            features['amount_ratio'] = min(amount1, amount2) / max(amount1, amount2)
-        else:
-            features['amount_ratio'] = 0.0
-
-        features['same_case_type'] = 1.0 if case1.get('case_type') == case2.get('case_type') else 0.0
-        features['same_jurisdiction'] = 1.0 if case1.get('jurisdiction') == case2.get('jurisdiction') else 0.0
-        features['same_defendant_type'] = 1.0 if case1.get('defendant_type') == case2.get('defendant_type') else 0.0
-        features['same_complexity'] = 1.0 if case1.get('complexity') == case2.get('complexity') else 0.0
-
-        dur1 = case1.get('estimated_duration_months', 12)
-        dur2 = case2.get('estimated_duration_months', 12)
-        features['duration_ratio'] = min(dur1, dur2) / max(dur1, dur2) if max(dur1, dur2) > 0 else 0.0
-        features['entity_overlap'] = self._calculate_entity_overlap(text1, text2)
-
-        return features
-
-    def _calculate_entity_overlap(self, text1: str, text2: str) -> float:
-        """Calculate overlap of potential named entities"""
-        words1 = set(re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text1))
-        words2 = set(re.findall(r'\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*\b', text2))
-
-        if not words1 or not words2:
-            return 0.0
-
-        intersection = len(words1 & words2)
-        union = len(words1 | words2)
-
-        return intersection / union if union > 0 else 0.0
-
-    def _calculate_composite_score(self, features: Dict) -> float:
-        """Calculate weighted composite similarity score"""
-        weights = {
-            'tfidf_similarity': 0.30,
-            'sequence_similarity': 0.15,
-            'amount_ratio': 0.15,
-            'same_case_type': 0.10,
-            'same_jurisdiction': 0.08,
-            'same_defendant_type': 0.07,
-            'same_complexity': 0.05,
-            'duration_ratio': 0.05,
-            'entity_overlap': 0.05
-        }
-
-        score = sum(features.get(k, 0) * v for k, v in weights.items())
-        return score
-
-    def find_duplicates(self, cases: List[Dict], threshold: float = 0.60) -> List[Dict]:
-        """Find potential duplicates using ML features"""
-        if len(cases) < 2:
-            return []
-
-        duplicates = []
-
-        for i in range(len(cases)):
-            for j in range(i + 1, len(cases)):
-                features = self._extract_features(cases[i], cases[j])
-                final_score = self._calculate_composite_score(features)
-
-                if final_score >= threshold:
-                    duplicates.append({
-                        'case_1': cases[i]['case_id'],
-                        'case_2': cases[j]['case_id'],
-                        'similarity': round(final_score * 100, 1),
-                        'features': {
-                            'text_similarity': round(features['tfidf_similarity'] * 100, 1),
-                            'amount_match': round(features['amount_ratio'] * 100, 1),
-                            'same_type': features['same_case_type'] == 1.0,
-                            'same_jurisdiction': features['same_jurisdiction'] == 1.0,
-                            'entity_overlap': round(features['entity_overlap'] * 100, 1)
-                        },
-                        'confidence': 'High' if final_score >= 0.80 else ('Medium' if final_score >= 0.65 else 'Low'),
-                        'case_1_details': cases[i],
-                        'case_2_details': cases[j]
-                    })
-
-        duplicates.sort(key=lambda x: x['similarity'], reverse=True)
-        return duplicates
-
-    def add_training_example(self, case1_id: str, case2_id: str, is_duplicate: bool, cases: List[Dict]) -> bool:
-        """Add a labeled training example"""
-        case1 = next((c for c in cases if c['case_id'] == case1_id), None)
-        case2 = next((c for c in cases if c['case_id'] == case2_id), None)
-
-        if not case1 or not case2:
-            return False
-
-        features = self._extract_features(case1, case2)
-        self.training_data.append({
-            'features': features,
-            'is_duplicate': is_duplicate,
-            'case1_id': case1_id,
-            'case2_id': case2_id
-        })
-
-        if len(self.training_data) >= 5 and SKLEARN_AVAILABLE:
-            self._train_classifier()
-
-        return True
-
-    def _train_classifier(self):
-        """Train the classifier on labeled examples"""
-        if len(self.training_data) < 5 or not SKLEARN_AVAILABLE:
-            return
-
-        X = []
-        y = []
-
-        for example in self.training_data:
-            X.append(list(example['features'].values()))
-            y.append(1 if example['is_duplicate'] else 0)
-
-        self.classifier = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=10,
-            random_state=42
-        )
-        self.classifier.fit(X, y)
-        self.is_trained = True
-
-    def get_training_stats(self) -> Dict:
-        """Get statistics about training data"""
-        duplicates = sum(1 for x in self.training_data if x['is_duplicate'])
-        return {
-            'total_examples': len(self.training_data),
-            'duplicates': duplicates,
-            'non_duplicates': len(self.training_data) - duplicates,
-            'is_trained': self.is_trained
-        }
-
-
 class SuccessPredictor:
     """Predict case success rate based on UK law and historical patterns"""
 
@@ -518,11 +390,6 @@ class SuccessPredictor:
         }
 
 
-# Initialize global detector
-if 'duplicate_detector' not in st.session_state:
-    st.session_state.duplicate_detector = MLDuplicateDetector()
-
-
 def login_page():
     """Display login page"""
     st.markdown('<h1 class="main-header">SABLEMOORE</h1>', unsafe_allow_html=True)
@@ -546,7 +413,7 @@ def login_page():
                     st.error("Invalid username or password")
 
         st.markdown("---")
-        st.caption("🔒 Secure access to litigation analytics")
+        st.caption("Secure access to litigation analytics")
 
 
 def dashboard_page():
@@ -697,11 +564,6 @@ def upload_page():
             method = prediction.get('prediction_method', 'rule_based')
             st.metric("Method", "ML" if 'ml' in method else "Rules")
 
-        # Show confidence interval if available
-        if 'confidence_interval' in prediction:
-            ci = prediction['confidence_interval']
-            st.caption(f"95% Confidence Interval: {ci['low']:.1f}% - {ci['high']:.1f}%")
-
         st.info(prediction['recommendation'])
 
 
@@ -770,32 +632,285 @@ def analysis_page():
                 st.success("**Positive Factors:** " + "; ".join(case['positive_factors']))
 
 
+def ai_agent_page():
+    """AI Agent chat interface"""
+    st.subheader("AI Agent")
+
+    if not AI_AGENT_AVAILABLE:
+        st.error("AI Agent module not available. Please check installation.")
+        return
+
+    agent = st.session_state.ai_agent
+    cases = st.session_state.cases
+    predictions = st.session_state.predictions
+
+    # Agent status
+    status = agent.get_status()
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        if status['llm_available']:
+            st.success(f"Provider: {status['provider'].title()}")
+        else:
+            st.info("Provider: Rule-based")
+    with col2:
+        st.info(f"Model: {status['model'] or 'N/A'}")
+    with col3:
+        st.metric("Cases Loaded", len(cases))
+
+    # API Key configuration
+    with st.expander("Configure AI Provider (Optional)"):
+        st.caption("Enter an API key to enable LLM-powered analysis.")
+        col1, col2 = st.columns(2)
+        with col1:
+            openai_key = st.text_input("OpenAI API Key", type="password", key="agent_openai")
+        with col2:
+            anthropic_key = st.text_input("Anthropic API Key", type="password", key="agent_anthropic")
+
+        if st.button("Update API Keys", key="update_agent_keys"):
+            if anthropic_key:
+                os.environ['ANTHROPIC_API_KEY'] = anthropic_key
+                st.session_state.ai_agent = get_ai_agent()
+                st.success("Anthropic API key configured!")
+                st.rerun()
+            elif openai_key:
+                os.environ['OPENAI_API_KEY'] = openai_key
+                st.session_state.ai_agent = get_ai_agent()
+                st.success("OpenAI API key configured!")
+                st.rerun()
+
+    st.markdown("---")
+
+    # Quick actions
+    st.markdown("### Quick Actions")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        if st.button("Scan for Duplicates", use_container_width=True):
+            st.session_state.chat_history.append({
+                'role': 'user',
+                'content': 'Scan my portfolio for duplicate cases'
+            })
+            st.rerun()
+
+    with col2:
+        if st.button("Portfolio Summary", use_container_width=True):
+            st.session_state.chat_history.append({
+                'role': 'user',
+                'content': 'Give me a portfolio overview'
+            })
+            st.rerun()
+
+    with col3:
+        if st.button("Risk Analysis", use_container_width=True):
+            st.session_state.chat_history.append({
+                'role': 'user',
+                'content': 'Analyze the risk in my portfolio'
+            })
+            st.rerun()
+
+    with col4:
+        if st.button("Clear Chat", use_container_width=True):
+            st.session_state.chat_history = []
+            agent.clear_history()
+            st.rerun()
+
+    st.markdown("---")
+
+    # Chat interface
+    st.markdown("### Chat with AI Agent")
+
+    # Display chat history
+    for msg in st.session_state.chat_history:
+        if msg['role'] == 'user':
+            st.markdown(f"""
+            <div class="chat-message user-message">
+                <strong>You:</strong><br>{msg['content']}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class="chat-message agent-message">
+                <strong>AI Agent:</strong><br>{msg['content']}
+            </div>
+            """, unsafe_allow_html=True)
+
+    # Process pending messages
+    if st.session_state.chat_history and st.session_state.chat_history[-1]['role'] == 'user':
+        with st.spinner("AI Agent is thinking..."):
+            last_message = st.session_state.chat_history[-1]['content']
+            response = agent.chat(last_message, cases, predictions)
+            st.session_state.chat_history.append({
+                'role': 'assistant',
+                'content': response['response']
+            })
+            st.rerun()
+
+    # Chat input
+    user_input = st.text_input(
+        "Ask the AI Agent...",
+        placeholder="e.g., 'Find duplicates', 'Analyze case #abc123', 'Give me portfolio insights'",
+        key="agent_input"
+    )
+
+    if st.button("Send", type="primary") and user_input:
+        st.session_state.chat_history.append({
+            'role': 'user',
+            'content': user_input
+        })
+        st.rerun()
+
+
+def ai_duplicates_page():
+    """AI-powered intelligent duplicate detection"""
+    st.subheader("AI Duplicate Scanner")
+
+    if not AI_AGENT_AVAILABLE:
+        st.warning("AI Agent not available. Using ML-based detection instead.")
+        duplicates_page()
+        return
+
+    cases = st.session_state.cases
+    detector = st.session_state.intelligent_detector
+
+    st.info("""
+    **Intelligent Duplicate Detection** uses AI to understand case context, not just match keywords.
+    It can detect:
+    - Same parties with different name spellings (Smith/Smyth, Ltd/Limited)
+    - Same incident described differently
+    - Related cases (appeals, counterclaims)
+    - Cases sharing key facts
+    """)
+
+    if len(cases) < 2:
+        st.warning("Need at least 2 cases to detect duplicates. Upload more cases first.")
+        return
+
+    # Detection settings
+    st.markdown("### Detection Settings")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        confidence_level = st.select_slider(
+            "Minimum Confidence",
+            options=['unlikely', 'possible', 'likely', 'definite'],
+            value='possible',
+            help="Higher confidence = fewer but more certain matches"
+        )
+
+    with col2:
+        st.markdown("**Confidence Levels:**")
+        st.markdown("""
+        - **Definite**: Almost certainly the same case
+        - **Likely**: Probably duplicates, review recommended
+        - **Possible**: May be related, needs investigation
+        - **Unlikely**: Probably different cases
+        """)
+
+    if st.button("Scan for Duplicates", type="primary"):
+        with st.spinner("AI is analyzing cases for duplicates..."):
+            duplicates = detector.find_duplicates(cases, min_confidence=confidence_level)
+
+        if duplicates:
+            st.warning(f"Found **{len(duplicates)}** potential duplicate(s)")
+
+            for i, dup in enumerate(duplicates):
+                confidence = dup.get('confidence', 'possible')
+                confidence_class = f"confidence-{confidence}"
+
+                with st.expander(
+                    f"Match {i+1}: Cases #{dup['case_1']} & #{dup['case_2']} - "
+                    f"{confidence.upper()} ({dup['similarity']:.1f}%)"
+                ):
+                    # Case comparison
+                    col1, col2 = st.columns(2)
+
+                    c1 = dup.get('case_1_details', {})
+                    c2 = dup.get('case_2_details', {})
+
+                    with col1:
+                        st.markdown(f"**Case #{dup['case_1']}**")
+                        st.write(f"- Type: {c1.get('case_type', 'Unknown')}")
+                        st.write(f"- Claim: £{c1.get('claim_amount', 0):,.0f}")
+                        st.write(f"- Jurisdiction: {c1.get('jurisdiction', 'Unknown')}")
+
+                    with col2:
+                        st.markdown(f"**Case #{dup['case_2']}**")
+                        st.write(f"- Type: {c2.get('case_type', 'Unknown')}")
+                        st.write(f"- Claim: £{c2.get('claim_amount', 0):,.0f}")
+                        st.write(f"- Jurisdiction: {c2.get('jurisdiction', 'Unknown')}")
+
+                    # AI Analysis
+                    st.markdown("---")
+                    st.markdown("**AI Analysis:**")
+                    st.markdown(f"<span class='{confidence_class}'>Confidence: {confidence.upper()}</span>",
+                               unsafe_allow_html=True)
+
+                    if dup.get('explanation'):
+                        st.info(dup['explanation'])
+
+                    if dup.get('recommendation'):
+                        st.success(f"**Recommendation:** {dup['recommendation']}")
+
+                    # Matching factors
+                    if dup.get('matching_factors'):
+                        st.markdown("**Matching Factors:**")
+                        for factor in dup['matching_factors']:
+                            if isinstance(factor, dict):
+                                icon = "✓" if factor.get('match') else "✗"
+                                st.write(f"{icon} {factor.get('factor', factor.get('details', ''))}")
+                            else:
+                                st.write(f"• {factor}")
+        else:
+            st.success("No potential duplicates found at the selected confidence level.")
+
+    # Stats
+    st.markdown("---")
+    stats = detector.get_training_stats()
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Provider", stats.get('provider', 'rule_based').title())
+    col2.metric("Model", stats.get('model', 'N/A') or 'Rule-based')
+    col3.metric("AI Ready", "Yes" if stats.get('is_trained') else "No")
+
+
 def duplicates_page():
-    """Display duplicate detection page"""
+    """Display ML duplicate detection page (fallback)"""
     cases = st.session_state.cases
 
     # Get detector from ML engine or fallback
     if ML_ENGINE_AVAILABLE:
-        detector = st.session_state.duplicate_detector
-    elif 'duplicate_detector' in st.session_state:
         detector = st.session_state.duplicate_detector
     else:
         st.error("Duplicate detector not available")
         return
 
     st.subheader("ML Duplicate Detection")
-    st.info("🤖 Enhanced with fuzzy name matching! Now detects misspellings (John/Jon) and name variants (William/Bill) using Soundex, Metaphone, and Levenshtein distance.")
+    st.info("Using ML-based detection with fuzzy name matching.")
 
     if len(cases) < 2:
         st.warning("Need at least 2 cases to detect duplicates. Upload more cases first.")
         return
 
-    # Threshold slider
-    threshold = st.slider("Similarity Threshold (%)", 30, 95, 60, help="Lower thresholds find more matches but may include false positives")
+    # Detection settings
+    col1, col2 = st.columns(2)
+
+    with col1:
+        threshold = st.slider("Similarity Threshold (%)", 50, 95, 75)
+
+    with col2:
+        filter_by_party = st.checkbox("Filter by Party Names", value=False)
+        if filter_by_party:
+            party_threshold = st.slider("Party Match Threshold (%)", 30, 80, 50)
+        else:
+            party_threshold = 50
 
     if st.button("Scan for Duplicates", type="primary"):
         with st.spinner("Scanning for duplicates..."):
-            duplicates = detector.find_duplicates(cases, threshold / 100)
+            duplicates = detector.find_duplicates(
+                cases,
+                threshold / 100,
+                filter_by_party=filter_by_party,
+                party_threshold=party_threshold / 100
+            )
 
         if duplicates:
             st.warning(f"Found {len(duplicates)} potential duplicate(s)")
@@ -803,90 +918,30 @@ def duplicates_page():
             for dup in duplicates:
                 confidence_color = {'High': '🔴', 'Medium': '🟡', 'Low': '🔵'}
 
-                with st.expander(f"{confidence_color[dup['confidence']]} {dup['similarity']}% Similar - Cases #{dup['case_1']} & #{dup['case_2']}"):
+                with st.expander(f"{confidence_color.get(dup['confidence'], '🔵')} {dup['similarity']}% Similar - Cases #{dup['case_1']} & #{dup['case_2']}"):
                     col1, col2 = st.columns(2)
 
                     with col1:
                         st.markdown(f"**Case #{dup['case_1']}**")
-                        c1 = dup['case_1_details']
-                        st.write(f"- Type: {c1['case_type']}")
-                        st.write(f"- Claim: £{c1['claim_amount']:,.0f}")
-                        st.write(f"- Jurisdiction: {c1['jurisdiction']}")
+                        c1 = dup.get('case_1_details', {})
+                        st.write(f"- Type: {c1.get('case_type', 'Unknown')}")
+                        st.write(f"- Claim: £{c1.get('claim_amount', 0):,.0f}")
 
                     with col2:
                         st.markdown(f"**Case #{dup['case_2']}**")
-                        c2 = dup['case_2_details']
-                        st.write(f"- Type: {c2['case_type']}")
-                        st.write(f"- Claim: £{c2['claim_amount']:,.0f}")
-                        st.write(f"- Jurisdiction: {c2['jurisdiction']}")
+                        c2 = dup.get('case_2_details', {})
+                        st.write(f"- Type: {c2.get('case_type', 'Unknown')}")
+                        st.write(f"- Claim: £{c2.get('claim_amount', 0):,.0f}")
 
                     st.markdown("**Similarity Breakdown:**")
-                    feat = dup['features']
+                    feat = dup.get('features', {})
                     cols = st.columns(4)
-                    cols[0].metric("Text", f"{feat['text_similarity']}%")
-                    cols[1].metric("Amount", f"{feat['amount_match']}%")
-                    cols[2].metric("Same Type", "✓" if feat['same_type'] else "✗")
-                    cols[3].metric("Same Jurisdiction", "✓" if feat['same_jurisdiction'] else "✗")
-
-                    # NEW: Show name matching results
-                    st.markdown("**Name Matching (Fuzzy):**")
-                    name_cols = st.columns(2)
-                    def_match = feat.get('defendant_name_match', 0)
-                    claim_match = feat.get('claimant_name_match', 0)
-                    name_cols[0].metric("Defendant Match", f"{def_match}%",
-                                       delta="High" if def_match >= 70 else ("Medium" if def_match >= 50 else None))
-                    name_cols[1].metric("Claimant Match", f"{claim_match}%",
-                                       delta="High" if claim_match >= 70 else ("Medium" if claim_match >= 50 else None))
-
-                    # Show extracted names if available
-                    if 'name_matches' in dup:
-                        nm = dup['name_matches']
-                        if nm.get('case1_defendants') or nm.get('case2_defendants'):
-                            st.markdown("**Extracted Names:**")
-                            ncol1, ncol2 = st.columns(2)
-                            with ncol1:
-                                st.write(f"Case 1 Defendants: {', '.join(nm.get('case1_defendants', [])) or 'None found'}")
-                                st.write(f"Case 1 Claimants: {', '.join(nm.get('case1_claimants', [])) or 'None found'}")
-                            with ncol2:
-                                st.write(f"Case 2 Defendants: {', '.join(nm.get('case2_defendants', [])) or 'None found'}")
-                                st.write(f"Case 2 Claimants: {', '.join(nm.get('case2_claimants', [])) or 'None found'}")
-
-                        # Show matched names
-                        if nm.get('defendant_matches'):
-                            st.success("**Defendant Name Matches Found:**")
-                            for match in nm['defendant_matches']:
-                                if len(match) >= 3:
-                                    st.write(f"  • '{match[0]}' ↔ '{match[1]}' (Similarity: {match[2]*100:.0f}%)")
-                        if nm.get('claimant_matches'):
-                            st.success("**Claimant Name Matches Found:**")
-                            for match in nm['claimant_matches']:
-                                if len(match) >= 3:
-                                    st.write(f"  • '{match[0]}' ↔ '{match[1]}' (Similarity: {match[2]*100:.0f}%)")
-
-                    # Training feedback
-                    st.markdown("---")
-                    st.markdown("**Help improve detection:**")
-                    fcol1, fcol2 = st.columns(2)
-                    with fcol1:
-                        if st.button(f"✓ Confirm Duplicate", key=f"dup_{dup['case_1']}_{dup['case_2']}"):
-                            detector.add_training_example(dup['case_1'], dup['case_2'], True, cases)
-                            st.success("Training example added: Duplicate")
-                    with fcol2:
-                        if st.button(f"✗ Not Duplicate", key=f"notdup_{dup['case_1']}_{dup['case_2']}"):
-                            detector.add_training_example(dup['case_1'], dup['case_2'], False, cases)
-                            st.success("Training example added: Not duplicate")
+                    cols[0].metric("Text", f"{feat.get('text_similarity', 0)}%")
+                    cols[1].metric("Amount", f"{feat.get('amount_match', 0)}%")
+                    cols[2].metric("Same Type", "Yes" if feat.get('same_type') else "No")
+                    cols[3].metric("Entity Overlap", f"{feat.get('entity_overlap', 0)}%")
         else:
             st.success("No duplicate cases found at the current threshold")
-
-    # Training stats sidebar
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("ML Model Status")
-    stats = detector.get_training_stats()
-    st.sidebar.metric("Training Examples", stats['total_examples'])
-    st.sidebar.metric("Model Status", "Trained" if stats['is_trained'] else "Not Trained")
-
-    if stats['total_examples'] < 5:
-        st.sidebar.info(f"Provide {5 - stats['total_examples']} more examples to train the ML model")
 
 
 def portfolio_page():
@@ -1026,125 +1081,14 @@ def export_page():
         )
 
     with col2:
-        # Excel export
-        import io
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='Cases', index=False)
-        buffer.seek(0)
-
+        # JSON export
+        json_data = json.dumps(combined, indent=2, default=str)
         st.download_button(
-            label="Download Excel",
-            data=buffer,
-            file_name=f"litigation_cases_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            label="Download JSON",
+            data=json_data,
+            file_name=f"litigation_cases_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json"
         )
-
-
-def ml_models_page():
-    """Display ML Models management page"""
-    st.subheader("ML Model Management")
-
-    if not ML_ENGINE_AVAILABLE:
-        st.error("ML Engine not available. Please check dependencies.")
-        return
-
-    model_manager = st.session_state.model_manager
-    success_predictor = st.session_state.success_predictor
-    duplicate_detector = st.session_state.duplicate_detector
-
-    # Model Status Overview
-    st.markdown("### Model Status")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("**Success Predictor**")
-        status = model_manager.get_model_status()
-
-        if success_predictor.is_trained:
-            st.success("✅ ML Model Trained")
-            st.write(f"Model Type: {status['success_predictor']['model_type']}")
-        else:
-            st.warning("⚠️ Using Rule-Based Predictions")
-            st.caption("Train the model with labeled data for ML predictions")
-
-    with col2:
-        st.markdown("**Duplicate Detector**")
-        dup_stats = duplicate_detector.get_training_stats()
-
-        if dup_stats['is_trained']:
-            st.success("✅ ML Model Trained")
-            st.write(f"Training Examples: {dup_stats['total_examples']}")
-        else:
-            st.warning(f"⚠️ Need {5 - dup_stats['total_examples']} more examples")
-
-    st.markdown("---")
-
-    # Training Section
-    st.markdown("### Train Success Predictor")
-    st.caption("Generate synthetic training data based on UK litigation patterns to bootstrap the ML model.")
-
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        n_samples = st.slider("Training Samples", 50, 500, 100, step=50)
-
-    with col2:
-        if st.button("Generate & Train", type="primary"):
-            with st.spinner("Generating training data and training model..."):
-                # Generate synthetic data
-                training_data = generate_synthetic_training_data(n_samples)
-
-                # Train the model
-                result = success_predictor.train(training_data)
-
-                if result['success']:
-                    st.success(f"✅ Model trained successfully!")
-                    st.write(f"- Model: {result['model_type']}")
-                    st.write(f"- Samples: {result['training_samples']}")
-                    st.write(f"- CV Accuracy: {result['cv_accuracy']:.2%} (±{result['cv_std']:.2%})")
-                else:
-                    st.error(result['message'])
-
-    st.markdown("---")
-
-    # Model Performance Visualization
-    st.markdown("### Model Insights")
-
-    if success_predictor.is_trained:
-        # Show feature importance if available
-        if hasattr(success_predictor.model, 'feature_importances_'):
-            importances = success_predictor.model.feature_importances_
-            feature_names = success_predictor.feature_names if success_predictor.feature_names else [f"Feature {i}" for i in range(len(importances))]
-
-            fig = px.bar(
-                x=importances,
-                y=feature_names,
-                orientation='h',
-                title="Feature Importance",
-                labels={'x': 'Importance', 'y': 'Feature'}
-            )
-            fig.update_layout(yaxis={'categoryorder': 'total ascending'})
-            st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Train the model to see feature importance analysis")
-
-    # Duplicate Detection Stats
-    st.markdown("### Duplicate Detection Training")
-
-    dup_stats = duplicate_detector.get_training_stats()
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Total Examples", dup_stats['total_examples'])
-    col2.metric("Marked Duplicates", dup_stats['duplicates'])
-    col3.metric("Non-Duplicates", dup_stats['non_duplicates'])
-
-    if dup_stats['total_examples'] >= 5:
-        st.success("✅ Sufficient data for ML training")
-    else:
-        st.warning(f"Need {5 - dup_stats['total_examples']} more labeled examples for ML training")
-        st.caption("Use the Duplicate Detection page to label potential duplicates")
 
 
 def main():
@@ -1160,7 +1104,7 @@ def main():
     st.sidebar.markdown("---")
 
     # User info
-    st.sidebar.markdown(f"👤 Logged in as **{st.session_state.username}**")
+    st.sidebar.markdown(f"Logged in as **{st.session_state.username}**")
 
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
@@ -1169,29 +1113,40 @@ def main():
 
     st.sidebar.markdown("---")
 
-    # Navigation - add ML Models page
-    page = st.sidebar.radio(
-        "Navigation",
-        ["Dashboard", "Upload Cases", "Case Analysis", "Duplicate Detection", "Portfolio", "ML Models", "Export Reports"],
-        label_visibility="collapsed"
-    )
+    # Navigation
+    pages = [
+        "Dashboard",
+        "Upload Cases",
+        "Case Analysis",
+        "AI Agent",
+        "AI Duplicate Scanner",
+        "Portfolio",
+        "Export Reports"
+    ]
+
+    # Add ML Duplicates as fallback option
+    if ML_ENGINE_AVAILABLE:
+        pages.insert(5, "ML Duplicates")
+
+    page = st.sidebar.radio("Navigation", pages, label_visibility="collapsed")
 
     # Stats in sidebar
     st.sidebar.markdown("---")
     st.sidebar.metric("Total Cases", len(st.session_state.cases))
 
-    # ML Status indicator
-    if ML_ENGINE_AVAILABLE:
-        predictor = st.session_state.success_predictor
-        if predictor.is_trained:
-            st.sidebar.success("🤖 ML Active")
+    # AI Status indicator
+    if AI_AGENT_AVAILABLE:
+        agent_status = st.session_state.ai_agent.get_status()
+        if agent_status['llm_available']:
+            st.sidebar.success(f"AI: {agent_status['provider'].title()}")
         else:
-            st.sidebar.warning("📊 Rules Mode")
+            st.sidebar.info("AI: Rule-based")
 
     # Clear data button
     if st.sidebar.button("Clear All Data", type="secondary"):
         st.session_state.cases = []
         st.session_state.predictions = []
+        st.session_state.chat_history = []
         st.rerun()
 
     # Page routing
@@ -1204,15 +1159,18 @@ def main():
     elif page == "Case Analysis":
         st.title("Case Analysis")
         analysis_page()
-    elif page == "Duplicate Detection":
-        st.title("Duplicate Detection")
+    elif page == "AI Agent":
+        st.title("AI Agent")
+        ai_agent_page()
+    elif page == "AI Duplicate Scanner":
+        st.title("AI Duplicate Scanner")
+        ai_duplicates_page()
+    elif page == "ML Duplicates":
+        st.title("ML Duplicate Detection")
         duplicates_page()
     elif page == "Portfolio":
         st.title("Portfolio Overview")
         portfolio_page()
-    elif page == "ML Models":
-        st.title("ML Models")
-        ml_models_page()
     elif page == "Export Reports":
         st.title("Export Reports")
         export_page()

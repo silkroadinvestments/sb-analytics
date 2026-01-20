@@ -1,0 +1,55 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets - NEVER commit these
+.streamlit/secrets.toml
+*.env
+.env.*
+
+# Model files (can be regenerated)
+*.pkl
+*.pickle
+
+# Data files
+*.json
+!package.json
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Original Duralux HTML template files (not needed for Streamlit)
+*.html
+!templates/*.html
+
+# Flask static assets (not needed for pure Streamlit)
+assets/
+templates/
+docs/
+partials/
+
+# Keep only essential Python files for Streamlit
+# The main files needed are:
+# - streamlit_app.py (main entry point)
+# - ai_agent.py
+# - ai_assistant.py
+# - ml_engine.py
+# - requirements.txt
+# - .streamlit/config.toml
+# - README.md
