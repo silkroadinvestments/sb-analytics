@@ -11,3 +11,8 @@ sentence-transformers>=2.2.0
 transformers>=4.30.0
 torch>=2.0.0
 spacy>=3.6.0
+
+# PolyMarket BTC Trading Bot
+py-clob-client>=0.17.0
+websocket-client>=1.6.0
+python-dotenv>=1.0.0
